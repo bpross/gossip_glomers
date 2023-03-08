@@ -23,8 +23,9 @@ type Node struct {
 }
 
 type BroadcastMessage struct {
-	Message int    `json:"message"`
-	Type    string `json:"type"`
+	Message int                 `json:"message"`
+	Type    string              `json:"type"`
+	Path    map[string]struct{} `json:"path"`
 }
 
 type ReadMessage struct {
@@ -52,18 +53,22 @@ func (bn *Node) Register() {
 			return err
 		}
 
+		if body.Path == nil {
+			log.Printf("Path was empty")
+			body.Path = make(map[string]struct{})
+		} else {
+			log.Printf("Path: %v\n", body.Path)
+		}
+
+		body.Path[msg.Src] = struct{}{}
+
 		if val := bn.addNewMessage(body.Message); val == ADDED {
-			bn.sendToNeighbors(body.Message)
+			//bn.sendToNeighbors(body.Message, body.Path)
 		}
 
 		resp := make(map[string]string)
 		resp["type"] = "broadcast_ok"
 
-		bn.seenLock.RLock()
-		log.Printf("Messages currently: %v\n", bn.messages)
-		bn.seenLock.RUnlock()
-
-		// Echo the original message back with the updated message type.
 		return bn.n.Reply(msg, resp)
 	})
 
@@ -87,13 +92,30 @@ func (bn *Node) Register() {
 			return err
 		}
 
-		id := bn.n.ID()
-		for neighbor := range body.Topology {
-			if neighbor == id {
-				continue
+		// Create spanning tree of the topology
+		// start with n0, since we know there will always be
+		// at least one node
+		start := "n0"
+		queue := []string{start}
+		spanningTree := make(map[string][]string)
+		visited := make(map[string]struct{})
+		visited[start] = struct{}{}
+
+		for len(queue) > 0 {
+			var n string
+			n, queue = queue[0], queue[1:]
+			for _, neighbor := range body.Topology[n] {
+				if _, ok := visited[neighbor]; !ok {
+					visited[neighbor] = struct{}{}
+					queue = append(queue, neighbor)
+					spanningTree[n] = append(spanningTree[n], neighbor)
+					spanningTree[neighbor] = append(spanningTree[neighbor], n)
+				}
 			}
-			bn.neighbors = append(bn.neighbors, neighbor)
 		}
+
+		log.Printf("spanning tree: %v\n", spanningTree)
+		bn.neighbors = spanningTree[bn.n.ID()]
 
 		resp := make(map[string]string)
 		resp["type"] = "topology_ok"
@@ -103,7 +125,7 @@ func (bn *Node) Register() {
 }
 
 func (bn *Node) Run() error {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	go func() {
 		for {
 			select {
@@ -116,17 +138,24 @@ func (bn *Node) Run() error {
 	return bn.n.Run()
 }
 
-func (bn *Node) sendToNeighbors(m int) {
+func (bn *Node) sendToNeighbors(m int, path map[string]struct{}) {
 	for _, neighbor := range bn.neighbors {
-		msg := &BroadcastMessage{
-			Message: m,
-			Type:    "broadcast",
+		if _, ok := path[neighbor]; ok {
+			continue
 		}
-		err := bn.n.Send(neighbor, msg)
-		if err != nil {
-			log.Fatalf("FAILED TO SEND MESSAGE TO: %s %v\n", neighbor, msg)
+		if err := bn.send(neighbor, m, path); err != nil {
+			log.Fatalf("FAILED TO SEND MESSAGE TO: %s %d\n", neighbor, m)
 		}
 	}
+}
+
+func (bn *Node) send(neighbor string, message int, path map[string]struct{}) error {
+	msg := &BroadcastMessage{
+		Message: message,
+		Type:    "broadcast",
+		Path:    path,
+	}
+	return bn.n.Send(neighbor, msg)
 }
 
 func (bn *Node) addNewMessage(m int) int {
@@ -156,9 +185,11 @@ func (bn *Node) readOk(msg maelstrom.Message) error {
 		}
 	}
 
-	for _, message := range bn.messages {
-		bn.sendToNeighbors(message)
-	}
+	// 	path := make(map[string]struct{})
+	// 	path[bn.n.ID()] = struct{}{}
+	// 	for _, message := range bn.messages {
+	// 		bn.send(msg.Src, message, path)
+	// 	}
 
 	return nil
 }
