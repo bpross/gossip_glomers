@@ -57,17 +57,7 @@ func (bn *Node) Register() {
 		return bn.n.Reply(msg, resp)
 	})
 
-	bn.n.Handle("internalBroadcast", func(msg maelstrom.Message) error {
-		// Unmarshal the message body as an loosely-typed map.
-		body := new(BroadcastMessage)
-		if err := json.Unmarshal(msg.Body, body); err != nil {
-			return err
-		}
-
-		if val := bn.addNewMessage(body.Message); val == ADDED {
-			bn.sendToNeighbors(body.Message)
-		}
-
+	bn.n.Handle("broadcast_ok", func(msg maelstrom.Message) error {
 		return nil
 	})
 
@@ -105,7 +95,7 @@ func (bn *Node) sendToNeighbors(m int) {
 	for _, neighbor := range bn.neighbors {
 		msg := &BroadcastMessage{
 			Message: m,
-			Type:    "internalBroadcast",
+			Type:    "broadcast",
 		}
 		err := bn.n.Send(neighbor, msg)
 		if err != nil {
@@ -116,11 +106,11 @@ func (bn *Node) sendToNeighbors(m int) {
 
 func (bn *Node) addNewMessage(m int) int {
 	bn.seenLock.Lock()
+	defer bn.seenLock.Unlock()
 	if _, ok := bn.seen[m]; ok {
 		return SEEN
 	}
 	bn.seen[m] = struct{}{}
 	bn.messages = append(bn.messages, m)
-	bn.seenLock.Unlock()
 	return ADDED
 }
