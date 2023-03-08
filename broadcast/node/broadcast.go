@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -24,6 +25,11 @@ type Node struct {
 type BroadcastMessage struct {
 	Message int    `json:"message"`
 	Type    string `json:"type"`
+}
+
+type ReadMessage struct {
+	Messages []int  `json:"messages"`
+	Type     string `json:"type"`
 }
 
 type TopologyMessage struct {
@@ -53,6 +59,10 @@ func (bn *Node) Register() {
 		resp := make(map[string]string)
 		resp["type"] = "broadcast_ok"
 
+		bn.seenLock.RLock()
+		log.Printf("Messages currently: %v\n", bn.messages)
+		bn.seenLock.RUnlock()
+
 		// Echo the original message back with the updated message type.
 		return bn.n.Reply(msg, resp)
 	})
@@ -78,7 +88,12 @@ func (bn *Node) Register() {
 		}
 
 		id := bn.n.ID()
-		bn.neighbors = body.Topology[id]
+		for neighbor := range body.Topology {
+			if neighbor == id {
+				continue
+			}
+			bn.neighbors = append(bn.neighbors, neighbor)
+		}
 
 		resp := make(map[string]string)
 		resp["type"] = "topology_ok"
@@ -88,6 +103,16 @@ func (bn *Node) Register() {
 }
 
 func (bn *Node) Run() error {
+	ticker := time.NewTicker(1 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				bn.reconcile()
+			}
+		}
+	}()
+
 	return bn.n.Run()
 }
 
@@ -113,4 +138,40 @@ func (bn *Node) addNewMessage(m int) int {
 	bn.seen[m] = struct{}{}
 	bn.messages = append(bn.messages, m)
 	return ADDED
+}
+
+func (bn *Node) readOk(msg maelstrom.Message) error {
+	body := new(ReadMessage)
+	if err := json.Unmarshal(msg.Body, body); err != nil {
+		return err
+	}
+
+	neighborSeen := make(map[int]struct{})
+
+	log.Printf("Messages received: %v\n", body.Messages)
+	for _, message := range body.Messages {
+		neighborSeen[message] = struct{}{}
+		if val := bn.addNewMessage(message); val == ADDED {
+			log.Printf("message %d added\n", message)
+		}
+	}
+
+	for _, message := range bn.messages {
+		bn.sendToNeighbors(message)
+	}
+
+	return nil
+}
+
+func (bn *Node) reconcile() {
+	req := make(map[string]any)
+	req["type"] = "read"
+
+	for _, neighbor := range bn.neighbors {
+		log.Printf("reconciling with neighbor: %s\n", neighbor)
+		err := bn.n.RPC(neighbor, req, bn.readOk)
+		if err != nil {
+			log.Fatalf("FAILED TO READ FROM NEIGHBOR: %s\n", neighbor)
+		}
+	}
 }
