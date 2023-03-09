@@ -74,6 +74,15 @@ func (bn *Node) Register() {
 		return nil
 	})
 
+	bn.n.Handle("read_ok", func(msg maelstrom.Message) error {
+		im := &internalMessage{
+			t:   "read_ok",
+			msg: msg,
+		}
+		bn.msgs <- im
+		return nil
+	})
+
 	bn.n.Handle("topology", func(msg maelstrom.Message) error {
 		im := &internalMessage{
 			t:   "topology",
@@ -89,6 +98,8 @@ func (bn *Node) Run() error {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		for {
 			select {
+			case <-ticker.C:
+				bn.reconcile()
 			case m := <-bn.msgs:
 				switch m.t {
 				case "broadcast":
@@ -99,13 +110,15 @@ func (bn *Node) Run() error {
 					if err := bn.handleRead(m.msg); err != nil {
 						log.Fatalf("error handling read")
 					}
+				case "read_ok":
+					if err := bn.readOk(m.msg); err != nil {
+						log.Fatalf("error handling read")
+					}
 				case "topology":
 					if err := bn.handleTopology(m.msg); err != nil {
 						log.Fatalf("error handling topology")
 					}
 				}
-			case <-ticker.C:
-				bn.reconcile()
 			default:
 			}
 		}
@@ -229,7 +242,7 @@ func (bn *Node) reconcile() {
 	req["type"] = "read"
 
 	for _, neighbor := range bn.neighbors {
-		err := bn.n.RPC(neighbor, req, bn.readOk)
+		err := bn.n.Send(neighbor, req)
 		if err != nil {
 			log.Fatalf("FAILED TO READ FROM NEIGHBOR: %s\n", neighbor)
 		}
