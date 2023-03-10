@@ -109,7 +109,7 @@ func (bn *Node) Register() {
 func (bn *Node) Run() error {
 	rand.Seed(time.Now().UnixNano())
 	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
+		ticker := time.NewTicker(10 * time.Second)
 		for {
 			select {
 			case <-ticker.C:
