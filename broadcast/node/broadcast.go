@@ -3,22 +3,28 @@ package node
 import (
 	"encoding/json"
 	"log"
+	"math/rand"
 	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
+	"github.com/meirf/gopart"
 )
 
 const (
-	ADDED = 0
-	SEEN  = 1
+	ADDED     = 0
+	SEEN      = 1
+	BROADCAST = "broadcast"
+	INTERNAL  = "internalBroadcast"
 )
 
 type Node struct {
-	n         *maelstrom.Node
-	messages  []int
-	seen      map[int]struct{}
-	neighbors []string
-	msgs      chan *internalMessage
+	n            *maelstrom.Node
+	messages     []int
+	seen         map[int]struct{}
+	neighbors    []string
+	msgs         chan *internalMessage
+	partitions   [][]string
+	partitionIdx int
 }
 
 type internalMessage struct {
@@ -27,9 +33,10 @@ type internalMessage struct {
 }
 
 type BroadcastMessage struct {
-	Message int                 `json:"message"`
-	Type    string              `json:"type"`
-	Path    map[string]struct{} `json:"path"`
+	Message   int                 `json:"message"`
+	Type      string              `json:"type"`
+	Path      map[string]struct{} `json:"path"`
+	Propegate bool                `json:"propegate"`
 }
 
 type ReadMessage struct {
@@ -43,11 +50,12 @@ type TopologyMessage struct {
 
 func NewBroadcast() *Node {
 	return &Node{
-		n:         maelstrom.NewNode(),
-		messages:  make([]int, 0),
-		seen:      make(map[int]struct{}, 0),
-		neighbors: make([]string, 0),
-		msgs:      make(chan *internalMessage),
+		n:          maelstrom.NewNode(),
+		messages:   make([]int, 0),
+		seen:       make(map[int]struct{}, 0),
+		neighbors:  make([]string, 0),
+		msgs:       make(chan *internalMessage),
+		partitions: make([][]string, 0),
 	}
 }
 
@@ -61,7 +69,12 @@ func (bn *Node) Register() {
 		return nil
 	})
 
-	bn.n.Handle("broadcast_ok", func(msg maelstrom.Message) error {
+	bn.n.Handle("internalBroadcast", func(msg maelstrom.Message) error {
+		im := &internalMessage{
+			t:   "internalBroadcast",
+			msg: msg,
+		}
+		bn.msgs <- im
 		return nil
 	})
 
@@ -94,18 +107,29 @@ func (bn *Node) Register() {
 }
 
 func (bn *Node) Run() error {
+	rand.Seed(time.Now().UnixNano())
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		for {
 			select {
 			case <-ticker.C:
 				bn.reconcile()
+			default:
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
 			case m := <-bn.msgs:
 				switch m.t {
 				case "broadcast":
 					if err := bn.handleBroadcast(m.msg); err != nil {
 						log.Fatalf("error handling broadcast")
 					}
+				case "internalBroadcast":
+					bn.handleInternalBroadcast(m.msg)
 				case "read":
 					if err := bn.handleRead(m.msg); err != nil {
 						log.Fatalf("error handling read")
@@ -126,6 +150,7 @@ func (bn *Node) Run() error {
 
 	return bn.n.Run()
 }
+
 func (bn *Node) handleBroadcast(msg maelstrom.Message) error {
 	body := new(BroadcastMessage)
 	if err := json.Unmarshal(msg.Body, body); err != nil {
@@ -141,14 +166,33 @@ func (bn *Node) handleBroadcast(msg maelstrom.Message) error {
 
 	body.Path[msg.Src] = struct{}{}
 
-	if val := bn.addNewMessage(body.Message); val == ADDED {
-		//bn.sendToNeighbors(body.Message, body.Path)
-	}
+	bn.sendToNeighbors(body.Message, body.Path)
+
+	// rn := bn.getRandomNeighbor()
+	// if rn != "" {
+	// 	body.Propegate = true
+	// 	bn.send(INTERNAL, rn, body.Message, body.Path)
+	// }
 
 	resp := make(map[string]string)
 	resp["type"] = "broadcast_ok"
 
 	return bn.n.Reply(msg, resp)
+}
+
+func (bn *Node) handleInternalBroadcast(msg maelstrom.Message) error {
+	body := new(BroadcastMessage)
+	if err := json.Unmarshal(msg.Body, body); err != nil {
+		return err
+	}
+
+	bn.addNewMessage(body.Message)
+
+	if body.Propegate {
+		bn.sendToNeighbors(body.Message, body.Path)
+	}
+
+	return nil
 }
 
 func (bn *Node) handleRead(msg maelstrom.Message) error {
@@ -165,30 +209,28 @@ func (bn *Node) handleTopology(msg maelstrom.Message) error {
 		return err
 	}
 
-	// Create spanning tree of the topology
-	// start with n0, since we know there will always be
-	// at least one node
-	start := "n0"
-	queue := []string{start}
-	spanningTree := make(map[string][]string)
-	visited := make(map[string]struct{})
-	visited[start] = struct{}{}
+	nodes := make([]string, len(body.Topology))
+	i := 0
+	idx := 0
+	for node := range body.Topology {
+		if node == bn.n.ID() {
+			idx = i
+		}
+		nodes[i] = node
+		i++
+	}
 
-	for len(queue) > 0 {
-		var n string
-		n, queue = queue[0], queue[1:]
-		for _, neighbor := range body.Topology[n] {
-			if _, ok := visited[neighbor]; !ok {
-				visited[neighbor] = struct{}{}
-				queue = append(queue, neighbor)
-				spanningTree[n] = append(spanningTree[n], neighbor)
-				spanningTree[neighbor] = append(spanningTree[neighbor], n)
-			}
+	partitionSize := len(nodes)/2 + 1
+	for idxRange := range gopart.Partition(len(nodes), partitionSize) {
+		partition := make([]string, partitionSize)
+		partition = nodes[idxRange.Low:idxRange.High]
+		bn.partitions = append(bn.partitions, partition)
+		if idxRange.Low <= idx && idx <= idxRange.High {
+			bn.partitionIdx = len(bn.partitions) - 1
 		}
 	}
 
-	log.Printf("spanning tree: %v\n", spanningTree)
-	bn.neighbors = spanningTree[bn.n.ID()]
+	bn.neighbors = bn.partitions[bn.partitionIdx]
 
 	resp := make(map[string]string)
 	resp["type"] = "topology_ok"
@@ -196,20 +238,20 @@ func (bn *Node) handleTopology(msg maelstrom.Message) error {
 	return bn.n.Reply(msg, resp)
 }
 func (bn *Node) sendToNeighbors(m int, path map[string]struct{}) {
-	for _, neighbor := range bn.neighbors {
+	for _, neighbor := range bn.n.NodeIDs() {
 		if _, ok := path[neighbor]; ok {
 			continue
 		}
-		if err := bn.send(neighbor, m, path); err != nil {
+		if err := bn.send(INTERNAL, neighbor, m, path); err != nil {
 			log.Fatalf("FAILED TO SEND MESSAGE TO: %s %d\n", neighbor, m)
 		}
 	}
 }
 
-func (bn *Node) send(neighbor string, message int, path map[string]struct{}) error {
+func (bn *Node) send(t, neighbor string, message int, path map[string]struct{}) error {
 	msg := &BroadcastMessage{
 		Message: message,
-		Type:    "broadcast",
+		Type:    t,
 		Path:    path,
 	}
 	return bn.n.Send(neighbor, msg)
@@ -231,7 +273,13 @@ func (bn *Node) readOk(msg maelstrom.Message) error {
 	}
 
 	for _, message := range body.Messages {
-		bn.addNewMessage(message)
+		if val := bn.addNewMessage(message); val == ADDED {
+			for _, neighbor := range bn.neighbors {
+				path := make(map[string]struct{})
+				path[bn.n.ID()] = struct{}{}
+				bn.send(INTERNAL, neighbor, message, path)
+			}
+		}
 	}
 
 	return nil
@@ -241,10 +289,26 @@ func (bn *Node) reconcile() {
 	req := make(map[string]any)
 	req["type"] = "read"
 
-	for _, neighbor := range bn.neighbors {
-		err := bn.n.Send(neighbor, req)
-		if err != nil {
-			log.Fatalf("FAILED TO READ FROM NEIGHBOR: %s\n", neighbor)
-		}
+	neighbor := bn.getRandomNeighbor()
+	if neighbor == "" {
+		return
 	}
+	err := bn.n.Send(neighbor, req)
+	if err != nil {
+		log.Fatalf("FAILED TO READ FROM NEIGHBOR: %s\n", neighbor)
+	}
+}
+
+func (bn *Node) getRandomNeighbor() string {
+	idx := bn.partitionIdx
+
+	r := len(bn.partitions)
+	if r == 0 {
+		return ""
+	}
+	for idx == bn.partitionIdx {
+		idx = rand.Intn(r)
+	}
+
+	return bn.partitions[idx][0]
 }
