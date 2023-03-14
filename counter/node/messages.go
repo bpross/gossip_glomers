@@ -6,14 +6,22 @@ import (
 
 const (
 	// Requests
+
+	// READ is the slug for a read request from a client
 	READ = "read"
-	ADD  = "add"
+	// ADD is the slug for an add request from a client
+	ADD = "add"
 
 	// Responses
-	ADDOK  = "add_ok"
+
+	// ADDOK is the slug for an add response
+	ADDOK = "add_ok"
+	// READOK is the slug for a read response
 	READOK = "read_ok"
 )
 
+// AddRequest represents the important information included
+// in an Add request from the client
 type AddRequest struct {
 	Delta int `json:"delta"`
 }
@@ -25,6 +33,8 @@ type internalMessage struct {
 	msg maelstrom.Message
 }
 
+// ReadResponse represents the important information
+// included in a read response thats sent to the client
 type ReadResponse struct {
 	Type  string `json:"type"`
 	Value int    `json:"value"`
