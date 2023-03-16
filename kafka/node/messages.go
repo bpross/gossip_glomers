@@ -22,7 +22,7 @@ const (
 	// Responses
 
 	// COMMITOFFSETSOK is the slug for a commit_offset response
-	COMMITOFFSETOK = "commit_offset_ok"
+	COMMITOFFSETOK = "commit_offsets_ok"
 
 	// LISTCOMMITTEDOFFSETSOK is the slug for a list_committed_offsets response
 	LISTCOMMITTEEDOFFSETSOK = "list_committed_offsets_ok"
@@ -69,8 +69,8 @@ type ListCommittedOffsetsResponse struct {
 // PollResponse represents the important information
 // in a response to a PollRequest
 type PollResponse struct {
-	Type string  `json:"type"`
-	Msgs [][]int `json:"msgs"`
+	Type string             `json:"type"`
+	Msgs map[string][][]int `json:"msgs"`
 }
 
 // SendResponse represents the important information
@@ -78,4 +78,11 @@ type PollResponse struct {
 type SendResponse struct {
 	Type   string `json:"type"`
 	Offset int    `json:"offset"`
+}
+
+// Wrap the library message so we can include type
+// then we dont have to unmarshal more than once
+type internalMessage struct {
+	t   string
+	msg maelstrom.Message
 }
