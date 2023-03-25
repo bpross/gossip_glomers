@@ -20,6 +20,8 @@ type Node struct {
 	casErrors        int
 }
 
+// NewKafka creates a new node that implements
+// the kafka protocol
 func NewKafka() *Node {
 	n := &Node{
 		n:                maelstrom.NewNode(),
@@ -31,6 +33,8 @@ func NewKafka() *Node {
 	return n
 }
 
+// Register registers all handler funcs for the necessary
+// messages
 func (kn *Node) Register() {
 	kn.n.Handle(SEND, func(msg maelstrom.Message) error {
 		im := &internalMessage{
@@ -66,11 +70,14 @@ func (kn *Node) Register() {
 	})
 }
 
+// Run setups the event loop and starts the node
 func (kn *Node) Run() error {
 	go kn.eventLoop()
 	return kn.n.Run()
 }
 
+// event loop handles incoming messages
+// and passes them off to the appropriate handlers
 func (kn *Node) eventLoop() {
 	for {
 		select {
@@ -98,6 +105,8 @@ func (kn *Node) eventLoop() {
 	}
 }
 
+// handleSend handles a send message from a client
+// it ALWAYS writes to the KV store until it was successful
 func (kn *Node) handleSend(m maelstrom.Message) error {
 	log.Printf("handling send\n")
 	body := new(SendRequest)
@@ -134,6 +143,8 @@ func (kn *Node) handleSend(m maelstrom.Message) error {
 	return kn.n.Reply(m, resp)
 }
 
+// handlePoll handles a poll message from the client
+// it ALWAYS reads from the KV store
 func (kn *Node) handlePoll(m maelstrom.Message) error {
 	log.Printf("handling poll\n")
 	body := new(PollRequest)
@@ -176,6 +187,7 @@ func (kn *Node) handlePoll(m maelstrom.Message) error {
 	return kn.n.Reply(m, resp)
 }
 
+// handles a client committing its offsets
 func (kn *Node) handleCommitOffsets(m maelstrom.Message) error {
 	log.Printf("handling commit offset\n")
 	body := new(CommitOffsetsRequest)
@@ -194,6 +206,7 @@ func (kn *Node) handleCommitOffsets(m maelstrom.Message) error {
 	return kn.n.Reply(m, resp)
 }
 
+// handles returning offsets that have been committed
 func (kn *Node) handleListCommittedOffsets(m maelstrom.Message) error {
 	log.Printf("list committed offsets\n")
 	body := new(ListCommitOffsetsRequest)
@@ -214,6 +227,7 @@ func (kn *Node) handleListCommittedOffsets(m maelstrom.Message) error {
 	return kn.n.Reply(m, resp)
 }
 
+// reads from the underlying kv store
 func (kn *Node) readFromKV(key string, create bool) ([]interface{}, error) {
 	ctx := context.Background()
 	var initialValue interface{}
@@ -249,6 +263,7 @@ func (kn *Node) readFromKV(key string, create bool) ([]interface{}, error) {
 	return val, nil
 }
 
+// writes to the underlying kv store
 func (kn *Node) writeToKV(key string, val int) (int, error) {
 	initialValue, err := kn.readFromKV(key, true)
 	if err != nil {

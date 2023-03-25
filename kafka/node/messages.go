@@ -21,10 +21,10 @@ const (
 
 	// Responses
 
-	// COMMITOFFSETSOK is the slug for a commit_offset response
+	// COMMITOFFSETOK is the slug for a commit_offset response
 	COMMITOFFSETOK = "commit_offsets_ok"
 
-	// LISTCOMMITTEDOFFSETSOK is the slug for a list_committed_offsets response
+	// LISTCOMMITTEEDOFFSETSOK is the slug for a list_committed_offsets response
 	LISTCOMMITTEEDOFFSETSOK = "list_committed_offsets_ok"
 
 	// POLLOK is the slug for a poll response
