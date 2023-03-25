@@ -1,7 +1,9 @@
 package node
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -11,19 +13,22 @@ import (
 // that stores state regarding local kafka storage
 type Node struct {
 	n    *maelstrom.Node
+	kv   *maelstrom.KV
 	msgs chan *internalMessage
 
 	committedOffsets map[string]int
-	storedMessages   map[string][]int
+	casErrors        int
 }
 
 func NewKafka() *Node {
-	return &Node{
+	n := &Node{
 		n:                maelstrom.NewNode(),
 		msgs:             make(chan *internalMessage),
 		committedOffsets: make(map[string]int),
-		storedMessages:   make(map[string][]int),
 	}
+
+	n.kv = maelstrom.NewLinKV(n.n)
+	return n
 }
 
 func (kn *Node) Register() {
@@ -100,16 +105,29 @@ func (kn *Node) handleSend(m maelstrom.Message) error {
 		return err
 	}
 
-	if val, ok := kn.storedMessages[body.Key]; ok {
-		val = append(val, body.Msg)
-		kn.storedMessages[body.Key] = val
-	} else {
-		kn.storedMessages[body.Key] = []int{body.Msg}
+	written := false
+	var offset int
+	var err error
+	for !written {
+		offset, err = kn.writeToKV(body.Key, body.Msg)
+		if err != nil {
+			var rpcError *maelstrom.RPCError
+			if errors.As(err, &rpcError) {
+				if rpcError.Code != maelstrom.PreconditionFailed {
+					log.Fatalf("COULD NOT WRITE TO KV: %v\n", err)
+					return err
+				}
+				kn.casErrors++
+				log.Printf("number of CAS errors: %d\n", kn.casErrors)
+			}
+		} else {
+			written = true
+		}
 	}
 
 	resp := &SendResponse{
 		Type:   SENDOK,
-		Offset: len(kn.storedMessages[body.Key]) - 1,
+		Offset: offset,
 	}
 
 	log.Printf("SEND REPLYING: %v\n", resp)
@@ -132,10 +150,24 @@ func (kn *Node) handlePoll(m maelstrom.Message) error {
 		// just give them the rest of the messages
 		msgs := make([][]int, 0)
 		i := offset
-		storedMsgs := kn.storedMessages[k]
-		for i < len(kn.storedMessages[k]) {
-			msgs = append(msgs, []int{i, storedMsgs[i]})
-			i++
+		storedMsgs, err := kn.readFromKV(k, false)
+		if err != nil {
+			var rpcError *maelstrom.RPCError
+			if errors.As(err, &rpcError) {
+				if rpcError.Code != maelstrom.KeyDoesNotExist {
+					log.Printf("COULD NOT GET VALUE FROM KV: %v\n", err)
+					return err
+				}
+			}
+		} else {
+			for i < len(storedMsgs) {
+				val, ok := storedMsgs[i].(float64)
+				if !ok {
+					log.Fatalf("VALUE FROM KV NOT INT: %T %v\n", storedMsgs[i], storedMsgs[i])
+				}
+				msgs = append(msgs, []int{i, int(val)})
+				i++
+			}
 		}
 		resp.Msgs[k] = msgs
 	}
@@ -180,4 +212,51 @@ func (kn *Node) handleListCommittedOffsets(m maelstrom.Message) error {
 
 	log.Printf("LCO replying: %v\n", resp)
 	return kn.n.Reply(m, resp)
+}
+
+func (kn *Node) readFromKV(key string, create bool) ([]interface{}, error) {
+	ctx := context.Background()
+	var initialValue interface{}
+
+	initialValue, err := kn.kv.Read(ctx, key)
+	if err != nil {
+		var rpcError *maelstrom.RPCError
+		if errors.As(err, &rpcError) {
+			if rpcError.Code == maelstrom.KeyDoesNotExist && create {
+				err = kn.kv.CompareAndSwap(ctx, key, []interface{}{}, []interface{}{}, true)
+				if err != nil {
+					log.Printf("COULD NOT CREATE VALUE: %v\n", err)
+					return nil, err
+				}
+			} else {
+				log.Printf("COULD NOT GET VALUE FROM KV: %v\n", err)
+				return nil, err
+			}
+		} else {
+			log.Printf("COULD NOT GET VALUE FROM KV: %v\n", err)
+			return nil, err
+		}
+	}
+
+	if initialValue == nil {
+		return []interface{}{}, nil
+	}
+
+	val, ok := initialValue.([]interface{})
+	if !ok {
+		log.Printf("BAD VAL FOR KEY: %T %v\n", initialValue, initialValue)
+	}
+	return val, nil
+}
+
+func (kn *Node) writeToKV(key string, val int) (int, error) {
+	initialValue, err := kn.readFromKV(key, true)
+	if err != nil {
+		return -1, err
+	}
+
+	log.Printf("before writing: %v\n", initialValue)
+	ctx := context.Background()
+	err = kn.kv.CompareAndSwap(ctx, key, initialValue, append(initialValue, val), true)
+	return len(initialValue), err
 }
